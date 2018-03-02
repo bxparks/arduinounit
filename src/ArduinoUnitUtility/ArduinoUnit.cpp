@@ -1,6 +1,15 @@
 #include <Arduino.h>
 #include <ArduinoUnit.h>
 
+#if TEST_REDUCE_PROGMEM == 2
+const char Test::ASSERTION[] PROGMEM = "Assertion ";
+const char Test::PASSED[] PROGMEM = "passed";
+const char Test::FAILED[] PROGMEM = "failed";
+#elif TEST_REDUCE_PROGMEM == 3
+const char Test::PASSED[] PROGMEM = "Passed";
+const char Test::FAILED[] PROGMEM = "Failed";
+#endif
+
 const uint8_t Test::UNSETUP = 0;
 const uint8_t Test::LOOPING = 1;
 const uint8_t Test::DONE_SKIP = 2;

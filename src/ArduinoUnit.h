@@ -9,6 +9,11 @@
 #include <stdint.h>
 #include <Print.h>
 
+// Various web documents says that FPSTR() should be in <WString.h> but it's
+// not there. It only seems to be available for ESP8266.
+//#include <WString.h>
+#define FPSTR(pstr_pointer) (reinterpret_cast<const __FlashStringHelper *>(pstr_pointer))
+
 #if ARDUINO >= 100 && ARDUINO < 103
 #undef F
 #undef PSTR
@@ -157,6 +162,30 @@ Clearing a mask in TEST_MAX_VERBOSITY eliminates the code related to that kind o
 #define TEST_MAX_VERBOSITY TEST_VERBOSITY_ALL
 #endif
 
+// The TEST_REDUCE_PROGMEM implements increasingly aggressive memory
+// saving techniques:
+// 0 - use the original code
+// 1 - remove lhss and rhss strings
+// 2 - all of (1) plus us (char *) instead of F() to collapse duplicates
+// 3 - all of (2) plus shorter message strings
+//
+// Here are some compilation results from a real-life unit test sketch
+// containing 25 tests, using 300 assertEqual() and 8 assertFalse() statements,
+// for a total of about 1200 lines of code. The following memory consumption
+// numbers are in bytes:
+//
+// METHOD | AVR(flash) | AVR(static) | Teensy(flash) | Teensy(static) |
+// -------+------------+-------------+---------------+----------------|
+//      0 |      49148 |        1039 |         34336 |           2956 |
+//      1 |      32360 |        1039 |         30008 |           2956 |
+//      2 |      25474 |        1079 |         30008 |           2956 |
+//      3 |      25290 |        1067 |         29856 |           2956 |
+//
+// When using an AVR board, we can save almost 24kB of flash memory at the cost
+// of only 28 bytes of static memory. The savings for a Teensy board is not as
+// dramatic, but still significant (5kB with no penalty for static memory).
+//
+#define TEST_REDUCE_PROGMEM 3
 
 /** \brief Check if given verbosity exists. (advanced)
 
@@ -489,8 +518,26 @@ void loop() {
 
   virtual ~Test();
 
+#if TEST_REDUCE_PROGMEM == 2
+  static const char ASSERTION[] PROGMEM;
+  static const char PASSED[] PROGMEM;
+  static const char FAILED[] PROGMEM;
+#elif TEST_REDUCE_PROGMEM == 3
+  static const char PASSED[] PROGMEM;
+  static const char FAILED[] PROGMEM;
+#endif
+
+#if TEST_REDUCE_PROGMEM == 0
   template <typename A, typename B>
     static bool assertion(const __FlashStringHelper *file, uint16_t line, const __FlashStringHelper *lhss, const A& lhs, const __FlashStringHelper *ops, bool (*op)(const A& lhs, const B& rhs), const __FlashStringHelper *rhss, const B& rhs) {
+#elif TEST_REDUCE_PROGMEM == 1
+  template <typename A, typename B>
+    static bool assertion(const __FlashStringHelper *file, uint16_t line, const A& lhs, const __FlashStringHelper *ops, bool (*op)(const A& lhs, const B& rhs), const B& rhs) {
+#else
+  template <typename A, typename B>
+    static bool assertion(const char *file, uint16_t line, const A& lhs, const char *ops, bool (*op)(const A& lhs, const B& rhs), const B& rhs) {
+#endif
+
     bool ok = op(lhs,rhs);
     bool output = false;
 
@@ -510,6 +557,9 @@ void loop() {
 
 #if TEST_VERBOSITY_EXISTS(ASSERTIONS_FAILED) || TEST_VERBOSITY_EXISTS(ASSERTIONS_PASSED)
     if (output) {
+#if TEST_REDUCE_PROGMEM == 0
+      // Prints out:
+      // Assertion failed: (expected=5) == (result=6), file Test.ino, line 820.
       out->print(F("Assertion "));
       out->print(ok ? F("passed") : F("failed"));
       out->print(F(": ("));
@@ -527,6 +577,54 @@ void loop() {
       out->print(F(", line "));
       out->print(line);
       out->println(".");
+#elif TEST_REDUCE_PROGMEM == 1
+      // Prints out:
+      // Failed: (5) == (6), file Test.ino, line 820.
+      out->print(F("Assertion "));
+      out->print(ok ? F("passed") : F("failed"));
+      out->print(F(": ("));
+      out->print(lhs);
+      out->print(F(") "));
+      out->print(ops);
+      out->print(F(" ("));
+      out->print(rhs);
+      out->print(F("), file "));
+      out->print(file);
+      out->print(F(", line "));
+      out->print(line);
+      out->println(".");
+#elif TEST_REDUCE_PROGMEM == 2
+      // Prints out:
+      // Failed: (5) == (6), file Test.ino, line 820.
+      out->print(FPSTR(ASSERTION));
+      out->print(ok ? FPSTR(PASSED) : FPSTR(FAILED));
+      out->print(": (");
+      out->print(lhs);
+      out->print(") ");
+      out->print(ops);
+      out->print(" (");
+      out->print(rhs);
+      out->print("), file ");
+      out->print(file);
+      out->print(", line ");
+      out->print(line);
+      out->println(".");
+#else
+      // Prints out:
+      // Failed: (5) == (6), Test.ino #820.
+      out->print(ok ? FPSTR(PASSED) : FPSTR(FAILED));
+      out->print(": (");
+      out->print(lhs);
+      out->print(") ");
+      out->print(ops);
+      out->print(" (");
+      out->print(rhs);
+      out->print("), ");
+      out->print(file);
+      out->print(" #");
+      out->print(line);
+      out->println('.');
+#endif
     }
 #endif
     return ok;
@@ -572,7 +670,19 @@ is in another file (or defined after the assertion on it). */
 #define externTesting(name) struct test_ ## name : Test { test_ ## name(); void loop(); }; extern test_##name test_##name##_instance
 
 // helper define for the operators below
+#if TEST_REDUCE_PROGMEM == 0
+
 #define assertOp(arg1,op,op_name,arg2) do { if (!Test::assertion<typeof(arg1),typeof(arg2)>(F(__FILE__),__LINE__,F(#arg1),(arg1),F(op_name),op,F(#arg2),(arg2))) return; } while (0)
+
+#elif TEST_REDUCE_PROGMEM == 1
+
+#define assertOp(arg1,op,op_name,arg2) do { if (!Test::assertion<typeof(arg1),typeof(arg2)>(F(__FILE__),__LINE__,(arg1),F(op_name),op,(arg2))) return; } while (0)
+
+#else
+
+#define assertOp(arg1,op,op_name,arg2) do { if (!Test::assertion<typeof(arg1),typeof(arg2)>(__FILE__,__LINE__,(arg1),op_name,op,(arg2))) return; } while (0)
+
+#endif
 
 /** macro generates optional output and calls fail() followed by a return if false. */
 #define assertEqual(arg1,arg2)       assertOp(arg1,compareEqual,"==",arg2)
